@@ -18,8 +18,11 @@ type Object struct {
 
 func Example_basicUsage() {
 
-	ring := new(redis.Client)
-
+	ring := redis.NewClient(&redis.Options{
+		Addr:     "127.0.0.1:6379",
+		Password: "",
+		DB:       0,
+	})
 	mycache := cache.New(&cache.Options{
 		Redis:      ring,
 		LocalCache: fastcache.New(100 << 20), // 100 MB
@@ -50,14 +53,28 @@ func Example_basicUsage() {
 }
 
 func Example_advancedUsage() {
-	ring := &redis.Client{}
+	//ring := redis.NewRing(&redis.RingOptions{
+	//	Addrs: map[string]string{
+	//		"server1": ":6379",
+	//		"server2": ":6380",
+	//	},
+	//})
+
+	ring := redis.NewClient(&redis.Options{
+		Addr:     "127.0.0.1:6379",
+		Password: "",
+		DB:       0,
+	})
+
+	_, err1 := ring.Set("test", 1, time.Hour).Result()
+	if err1 != nil {
+		fmt.Printf("set redis err:%v", err1)
+	}
 
 	mycache := cache.New(&cache.Options{
 		Redis:      ring,
 		LocalCache: fastcache.New(100 << 20), // 100 MB
 	})
-
-	mycache.GetRedisBytes()
 
 	obj := new(Object)
 	err := mycache.Once(&cache.Item{
