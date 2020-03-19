@@ -8,7 +8,7 @@ import (
 	"github.com/VictoriaMetrics/fastcache"
 	"github.com/go-redis/redis/v7"
 
-	"github.com/go-redis/cache/v8"
+	"github.com/star001007/cache/v9"
 )
 
 type Object struct {
