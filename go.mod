@@ -1,4 +1,4 @@
-module github.com/go-redis/cache/v8
+module github.com/star001007/cache/v8
 
 go 1.11
 
