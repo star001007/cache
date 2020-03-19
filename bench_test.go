@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/star001007/cache/v9"
+	"github.com/star001007/cache"
 )
 
 func BenchmarkOnce(b *testing.B) {

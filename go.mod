@@ -1,4 +1,4 @@
-module github.com/star001007/cache/v9
+module github.com/star001007/cache
 
 go 1.11
 

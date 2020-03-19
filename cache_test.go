@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/star001007/cache/v9"
+	"github.com/star001007/cache"
 )
 
 func TestGinkgo(t *testing.T) {
