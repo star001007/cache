@@ -100,6 +100,7 @@ type Options struct {
 	StatsEnabled     bool
 	BackgroundUpdate bool //是否启用后台更新策略
 	ErrUseStale      bool //异常可使用过期的数据
+	Retry            int  //重试次数
 }
 
 func (opt *Options) init() {
@@ -116,6 +117,7 @@ type Cache struct {
 
 	hits   uint64
 	misses uint64
+	errs   uint64
 }
 
 func New(opt *Options) *Cache {
@@ -211,12 +213,20 @@ func (cd *Cache) getBytes(ctx context.Context, key string, skipLocalCache bool) 
 	return data, err
 }
 
-func (cd *Cache) getRedisBytes(key string, skipLocalCache bool) ([]byte, error) {
+func (cd *Cache) getRedisBytes(key string, skipLocalCache bool) (b []byte, err error) {
 	if cd.opt.Redis == nil {
 		return nil, ErrCacheMiss
 	}
 
-	b, err := cd.opt.Redis.Get(key).Bytes()
+	for i := 0; i <= cd.opt.Retry+1; i++ {
+		b, err = cd.opt.Redis.Get(key).Bytes()
+		if err == nil || err == redis.Nil {
+			break
+		} else {
+			atomic.AddUint64(&cd.errs, 1)
+		}
+	}
+
 	if err != nil {
 		if cd.opt.StatsEnabled {
 			atomic.AddUint64(&cd.misses, 1)
@@ -451,6 +461,7 @@ func (cd *Cache) Unmarshal(b []byte, value interface{}) error {
 type Stats struct {
 	Hits   uint64
 	Misses uint64
+	Errs   uint64
 }
 
 // Stats returns cache statistics.
@@ -461,6 +472,7 @@ func (cd *Cache) Stats() *Stats {
 	return &Stats{
 		Hits:   atomic.LoadUint64(&cd.hits),
 		Misses: atomic.LoadUint64(&cd.misses),
+		Errs:   atomic.LoadUint64(&cd.errs),
 	}
 }
 
