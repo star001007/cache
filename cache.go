@@ -219,7 +219,14 @@ func (cd *Cache) getRedisBytes(key string, skipLocalCache bool) (b []byte, err e
 	}
 
 	for i := 0; i <= cd.opt.Retry+1; i++ {
-		b, err = cd.opt.Redis.Get(key).Bytes()
+		fmt.Println("t0:", i)
+
+		t := cd.opt.Redis.Get(key)
+		fmt.Println("t1:", t)
+
+		b, err = t.Bytes()
+		fmt.Println("t2:", b, err)
+
 		if err == nil || err == redis.Nil {
 			break
 		} else {
