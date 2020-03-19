@@ -96,7 +96,8 @@ type Options struct {
 	LocalCache    *fastcache.Cache
 	LocalCacheTTL time.Duration
 
-	StatsEnabled bool
+	StatsEnabled     bool
+	BackgroundUpdate bool
 }
 
 func (opt *Options) init() {
