@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/VictoriaMetrics/fastcache"
-	"github.com/go-redis/redis/v8"
+	"github.com/go-redis/redis/v7"
 
 	"github.com/go-redis/cache/v8"
 )
@@ -17,12 +17,8 @@ type Object struct {
 }
 
 func Example_basicUsage() {
-	ring := redis.NewRing(&redis.RingOptions{
-		Addrs: map[string]string{
-			"server1": ":6379",
-			"server2": ":6380",
-		},
-	})
+
+	ring := new(redis.Client)
 
 	mycache := cache.New(&cache.Options{
 		Redis:      ring,
@@ -54,17 +50,14 @@ func Example_basicUsage() {
 }
 
 func Example_advancedUsage() {
-	ring := redis.NewRing(&redis.RingOptions{
-		Addrs: map[string]string{
-			"server1": ":6379",
-			"server2": ":6380",
-		},
-	})
+	ring := &redis.Client{}
 
 	mycache := cache.New(&cache.Options{
 		Redis:      ring,
 		LocalCache: fastcache.New(100 << 20), // 100 MB
 	})
+
+	mycache.GetRedisBytes()
 
 	obj := new(Object)
 	err := mycache.Once(&cache.Item{

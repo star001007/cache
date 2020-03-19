@@ -6,13 +6,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/go-redis/redis/v7"
 	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/VictoriaMetrics/fastcache"
-	"github.com/go-redis/redis/v8"
 	"github.com/klauspost/compress/s2"
 	"github.com/vmihailenco/bufpool"
 	"github.com/vmihailenco/msgpack/v4"
@@ -30,12 +30,12 @@ var ErrCacheMiss = errors.New("cache: key is missing")
 var errRedisLocalCacheNil = errors.New("cache: both Redis and LocalCache are nil")
 
 type rediser interface {
-	Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.StatusCmd
-	SetXX(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.BoolCmd
-	SetNX(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.BoolCmd
+	Set(key string, value interface{}, expiration time.Duration) *redis.StatusCmd
+	SetXX(key string, value interface{}, expiration time.Duration) *redis.BoolCmd
+	SetNX(key string, value interface{}, expiration time.Duration) *redis.BoolCmd
 
-	Get(ctx context.Context, key string) *redis.StringCmd
-	Del(ctx context.Context, keys ...string) *redis.IntCmd
+	Get(key string) *redis.StringCmd
+	Del(keys ...string) *redis.IntCmd
 }
 
 type Item struct {
@@ -93,19 +93,18 @@ func (item *Item) ttl() time.Duration {
 type Options struct {
 	Redis rediser
 
-	LocalCache    *fastcache.Cache
-	LocalCacheTTL time.Duration
+	LocalCache         *fastcache.Cache
+	LocalCacheTTL      time.Duration
+	LocalCacheStoreTTL time.Duration
 
 	StatsEnabled     bool
-	BackgroundUpdate bool
+	BackgroundUpdate bool //是否启用后台更新策略
+	ErrUseStale      bool //异常可使用过期的数据
 }
 
 func (opt *Options) init() {
-	switch opt.LocalCacheTTL {
-	case -1:
-		opt.LocalCacheTTL = 0
-	case 0:
-		opt.LocalCacheTTL = time.Minute
+	if opt.LocalCacheStoreTTL < 0 { // <=0 不过期
+		opt.LocalCacheStoreTTL = 0
 	}
 }
 
@@ -113,6 +112,7 @@ type Cache struct {
 	opt *Options
 
 	group singleflight.Group
+	locks map[string]*uint32
 
 	hits   uint64
 	misses uint64
@@ -121,7 +121,8 @@ type Cache struct {
 func New(opt *Options) *Cache {
 	opt.init()
 	return &Cache{
-		opt: opt,
+		opt:   opt,
+		locks: make(map[string]*uint32),
 	}
 }
 
@@ -154,14 +155,14 @@ func (cd *Cache) set(item *Item) ([]byte, bool, error) {
 	}
 
 	if item.IfExists {
-		return b, true, cd.opt.Redis.SetXX(item.Context(), item.Key, b, item.ttl()).Err()
+		return b, true, cd.opt.Redis.SetXX(item.Key, b, item.ttl()).Err()
 	}
 
 	if item.IfNotExists {
-		return b, true, cd.opt.Redis.SetNX(item.Context(), item.Key, b, item.ttl()).Err()
+		return b, true, cd.opt.Redis.SetNX(item.Key, b, item.ttl()).Err()
 	}
 
-	return b, true, cd.opt.Redis.Set(item.Context(), item.Key, b, item.ttl()).Err()
+	return b, true, cd.opt.Redis.Set(item.Key, b, item.ttl()).Err()
 }
 
 // Exists reports whether value for the given key exists.
@@ -195,21 +196,27 @@ func (cd *Cache) get(
 }
 
 func (cd *Cache) getBytes(ctx context.Context, key string, skipLocalCache bool) ([]byte, error) {
+	var local []byte
 	if !skipLocalCache && cd.opt.LocalCache != nil {
-		b, ok := cd.localGet(key)
-		if ok {
-			return b, nil
+		var ok, expired bool
+		local, ok, expired = cd.localGet(key)
+		if ok && !expired {
+			return local, nil
 		}
 	}
+	data, err := cd.getRedisBytes(key, skipLocalCache)
+	if err != nil && cd.opt.ErrUseStale && local != nil {
+		return local, nil
+	}
+	return data, err
+}
 
+func (cd *Cache) getRedisBytes(key string, skipLocalCache bool) ([]byte, error) {
 	if cd.opt.Redis == nil {
-		if cd.opt.LocalCache == nil {
-			return nil, errRedisLocalCacheNil
-		}
 		return nil, ErrCacheMiss
 	}
 
-	b, err := cd.opt.Redis.Get(ctx, key).Bytes()
+	b, err := cd.opt.Redis.Get(key).Bytes()
 	if err != nil {
 		if cd.opt.StatsEnabled {
 			atomic.AddUint64(&cd.misses, 1)
@@ -257,10 +264,12 @@ func (cd *Cache) Once(item *Item) error {
 }
 
 func (cd *Cache) getSetItemBytesOnce(item *Item) (b []byte, cached bool, err error) {
+	var local []byte
 	if cd.opt.LocalCache != nil {
-		b, ok := cd.localGet(item.Key)
-		if ok {
-			return b, true, nil
+		var ok, expired bool
+		local, ok, expired = cd.localGet(item.Key)
+		if ok && !expired {
+			return local, true, nil
 		}
 	}
 
@@ -278,6 +287,9 @@ func (cd *Cache) getSetItemBytesOnce(item *Item) (b []byte, cached bool, err err
 		return nil, err
 	})
 	if err != nil {
+		if local != nil && cd.opt.ErrUseStale {
+			return local, true, nil
+		}
 		return nil, false, err
 	}
 	return v.([]byte), cached, nil
@@ -295,7 +307,7 @@ func (cd *Cache) Delete(ctx context.Context, key string) error {
 		return nil
 	}
 
-	deleted, err := cd.opt.Redis.Del(ctx, key).Result()
+	deleted, err := cd.opt.Redis.Del(key).Result()
 	if err != nil {
 		return err
 	}
@@ -306,7 +318,7 @@ func (cd *Cache) Delete(ctx context.Context, key string) error {
 }
 
 func (cd *Cache) localSet(key string, b []byte) {
-	if cd.opt.LocalCacheTTL > 0 {
+	if cd.opt.LocalCacheStoreTTL > 0 {
 		pos := len(b)
 		b = append(b, make([]byte, 4)...)
 		encodeTime(b[pos:], time.Now())
@@ -315,26 +327,35 @@ func (cd *Cache) localSet(key string, b []byte) {
 	cd.opt.LocalCache.Set([]byte(key), b)
 }
 
-func (cd *Cache) localGet(key string) ([]byte, bool) {
+func (cd *Cache) localGet(key string) ([]byte, bool, bool) {
 	b, ok := cd.opt.LocalCache.HasGet(nil, []byte(key))
 	if !ok {
-		return b, false
+		return b, false, false
 	}
 
-	if len(b) == 0 || cd.opt.LocalCacheTTL == 0 {
-		return b, true
+	if len(b) == 0 || cd.opt.LocalCacheStoreTTL == 0 {
+		return b, true, false
 	}
 	if len(b) < 4 {
 		panic("not reached")
 	}
 
 	tm := decodeTime(b[len(b)-4:])
-	if time.Since(tm) > cd.opt.LocalCacheTTL {
+	lifetime := time.Since(tm)
+	if lifetime > cd.opt.LocalCacheStoreTTL || (!cd.opt.BackgroundUpdate && lifetime > cd.opt.LocalCacheTTL) {
 		cd.opt.LocalCache.Del([]byte(key))
-		return nil, false
+		return b[:len(b)-4], true, true
 	}
 
-	return b[:len(b)-4], true
+	if cd.opt.BackgroundUpdate && lifetime > cd.opt.LocalCacheTTL {
+		if val, ok := cd.locks[key]; !ok {
+			if atomic.AddUint32(val, 1) == 1 {
+				go cd.getRedisBytes(key, false)
+				delete(cd.locks, key)
+			}
+		}
+	}
+	return b[:len(b)-4], true, false
 }
 
 var encPool = sync.Pool{
