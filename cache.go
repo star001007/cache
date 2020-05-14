@@ -206,6 +206,7 @@ func (cd *Cache) getBytes(ctx context.Context, key string, skipLocalCache bool) 
 			return local, nil
 		}
 	}
+
 	data, err := cd.getRedisBytes(key, skipLocalCache)
 	if err != nil && cd.opt.ErrUseStale && local != nil {
 		return local, nil
